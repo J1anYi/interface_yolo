@@ -1,0 +1,7 @@
+user/
+.trae/
+__pycache__/
+venv/
+
+*.log
+
