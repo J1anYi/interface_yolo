@@ -84,14 +84,14 @@ def load_model() -> bool:
 
 def calculate_obb_center_and_rotation(obb_coords: np.ndarray) -> Tuple[Tuple[float, float], float]:
     """
-    计算OBB的中心点和旋转角度
+    计算OBB的中心点和旋转角度（符合UE坐标系统）
     
     Args:
         obb_coords: OBB坐标数组，形状为(4, 2)，包含四个角点的x,y坐标
     
     Returns:
         center: (x, y) 中心点坐标
-        rotation: 旋转角度（度）
+        rotation: 旋转角度（度），向上为0度，顺时针为正
     """
     # 计算中心点
     center_x = np.mean(obb_coords[:, 0])
@@ -103,10 +103,19 @@ def calculate_obb_center_and_rotation(obb_coords: np.ndarray) -> Tuple[Tuple[flo
     dy = obb_coords[1, 1] - obb_coords[0, 1]
     
     # 计算角度（弧度转度）
+    # 标准atan2计算的是相对于水平向右的角度
     angle_rad = math.atan2(dy, dx)
     angle_deg = math.degrees(angle_rad)
     
-    return (center_x, center_y), angle_deg
+    # 转换为UE坐标系统：向上为0度，顺时针为正
+    # 水平向右为0度 -> 向上为0度：需要减去90度
+    # 然后取负值使顺时针为正（因为图像坐标系y轴向下）
+    ue_angle = -(angle_deg - 90)
+    
+    # 将角度规范化到[0, 360)范围
+    ue_angle = ue_angle % 360
+    
+    return (center_x, center_y), ue_angle
 
 def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
     """
@@ -161,12 +170,12 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                         "z": 0.0
                     },
                     "rotation": {
-                        "x": float(rotation),
-                        "y": 0.0,
-                        "z": 0.0
+                        "x": 0.0,  # 滚转角，设为0
+                        "y": 0.0,  # 俯仰角，设为0
+                        "z": float(rotation)  # 旋转角，向上为0度
                     },
                     "type": int(cls),
-                    "description": class_name,
+                    "obj_name": class_name,
                     "confidence": float(conf)
                 }
                 predictions.append(prediction)
@@ -203,7 +212,7 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                         "z": 0.0
                     },
                     "type": int(cls),
-                    "description": class_name,
+                    "obj_name": class_name,
                     "confidence": float(conf)
                 }
                 predictions.append(prediction)
@@ -287,8 +296,10 @@ async def predict(file: UploadFile = File(...)):
     
     try:
         # 验证文件类型
-        if not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="文件必须是图片格式")
+        if not file.content_type or not file.content_type.startswith('image/'):
+            # 如果content_type为空或不是图片，尝试从文件名判断
+            if not file.filename or not any(file.filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif']):
+                raise HTTPException(status_code=400, detail="请上传图片文件")
         
         # 读取图片
         image_data = await file.read()
@@ -323,6 +334,7 @@ async def predict(file: UploadFile = File(...)):
         
         # 构建响应
         response = {
+            "functionName": "make_home",
             "status": "success",
             "results": predictions,
             "image_path": save_path.replace("\\", "/"),

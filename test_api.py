@@ -73,7 +73,7 @@ def test_predict_api():
                     print(f"  位置: {obj.get('location', {})}")
                     print(f"  旋转: {obj.get('rotation', {})}")
                     print(f"  类型: {obj.get('type', 'N/A')}")
-                    print(f"  描述: {obj.get('description', 'N/A')}")
+                    print(f"  描述: {obj.get('obj_name', 'N/A')}")
                     print(f"  置信度: {obj.get('confidence', 'N/A')}")
                 
                 return True
