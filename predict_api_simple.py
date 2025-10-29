@@ -69,9 +69,61 @@ def load_model() -> bool:
     """加载YOLO模型"""
     global model
     try:
-        model_path = "best.pt"
+        # 获取脚本所在目录的绝对路径
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_filename = "best.pt"
+        model_path = os.path.join(script_dir, model_filename)
+        
+        # 输出调试信息
+        current_dir = os.getcwd()
+        logger.info(f"当前工作目录: {current_dir}")
+        logger.info(f"脚本目录: {script_dir}")
+        logger.info(f"模型文件路径: {model_path}")
+        
+        # 检查脚本目录是否存在且可读
+        if not os.path.exists(script_dir):
+            logger.error(f"脚本目录不存在: {script_dir}")
+            return False
+        
+        if not os.access(script_dir, os.R_OK):
+            logger.error(f"脚本目录无读取权限: {script_dir}")
+            return False
+        
+        # 检查模型文件是否存在
         if not os.path.exists(model_path):
             logger.error(f"模型文件不存在: {model_path}")
+            # 列出脚本目录下的所有文件，帮助调试
+            try:
+                files_in_dir = os.listdir(script_dir)
+                logger.info(f"脚本目录下的文件: {files_in_dir}")
+            except Exception as list_error:
+                logger.error(f"无法列出脚本目录文件: {list_error}")
+            return False
+        
+        # 检查模型文件权限
+        if not os.access(model_path, os.R_OK):
+            logger.error(f"模型文件无读取权限: {model_path}")
+            # 获取文件权限信息
+            try:
+                import stat
+                file_stat = os.stat(model_path)
+                file_mode = stat.filemode(file_stat.st_mode)
+                logger.error(f"文件权限: {file_mode}")
+                logger.error(f"文件所有者UID: {file_stat.st_uid}")
+                logger.error(f"文件组GID: {file_stat.st_gid}")
+            except Exception as stat_error:
+                logger.error(f"无法获取文件权限信息: {stat_error}")
+            return False
+        
+        # 检查文件大小
+        try:
+            file_size = os.path.getsize(model_path)
+            logger.info(f"模型文件大小: {file_size} 字节")
+            if file_size == 0:
+                logger.error("模型文件为空")
+                return False
+        except Exception as size_error:
+            logger.error(f"无法获取文件大小: {size_error}")
             return False
         
         logger.info(f"正在加载YOLO模型: {model_path}")
@@ -80,6 +132,9 @@ def load_model() -> bool:
         return True
     except Exception as e:
         logger.error(f"加载YOLO模型失败: {e}")
+        logger.error(f"异常类型: {type(e).__name__}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
         return False
 
 def calculate_obb_center_and_rotation(obb_coords: np.ndarray) -> Tuple[Tuple[float, float], float]:
