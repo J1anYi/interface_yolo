@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
 # FastAPI相关导入
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -30,7 +30,7 @@ import uvicorn
 # 导入YOLO相关模块
 import numpy as np
 from ultralytics import YOLO
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 # 配置日志
 logging.basicConfig(
@@ -415,6 +415,91 @@ async def predict(file: UploadFile = File(...)):
         raise
     except Exception as e:
         logger.error(f"[{request_id}] 预测过程中发生错误: {e}")
+        raise HTTPException(status_code=500, detail=f"预测失败: {str(e)}")
+
+@app.post("/predict_bytes")
+async def predict_bytes(data: bytes = Body(..., description="原始二进制图片数据", media_type="application/octet-stream")):
+    """
+    二进制数据预测接口
+    
+    - 输入：请求体为二进制数据（application/octet-stream），内容为图片的二进制字节
+    - 输出：与 /predict 接口一致的JSON结构
+    - 处理流程：二进制数据->PIL图片(RGB)->保存->调用yolo_prediction->构建响应
+    """
+    start_time = time.time()
+
+    # 生成请求ID
+    timestamp = int(time.time() * 1000)
+    request_id = f"req_{timestamp}"
+
+    try:
+        # 校验二进制数据
+        if data is None or len(data) == 0:
+            raise HTTPException(status_code=400, detail="请求体为空或不是有效的二进制图片数据")
+
+        logger.info(f"[{request_id}] 收到二进制预测请求，数据长度: {len(data)} 字节")
+
+        # 将二进制数据转换为图片
+        try:
+            image = Image.open(io.BytesIO(data))
+        except UnidentifiedImageError:
+            raise HTTPException(status_code=400, detail="二进制数据无法识别为图片")
+
+        # 转换为RGB格式（如果需要）
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        logger.info(f"[{request_id}] 图片加载成功，尺寸: {image.size}")
+
+        # 保存上传的图片（与 /predict 保持一致）
+        date_folder = datetime.now().strftime("%Y%m%d")
+        save_dir = os.path.join("user", "image", date_folder)
+        os.makedirs(save_dir, exist_ok=True)
+
+        # 生成唯一文件名（基于内容哈希）
+        file_hash = hashlib.md5(data).hexdigest()[:8]
+        save_filename = f"{timestamp}_{file_hash}.jpg"
+        save_path = os.path.join(save_dir, save_filename)
+
+        # 保存图片为JPEG
+        image.save(save_path, "JPEG", quality=95)
+        logger.info(f"[{request_id}] 图片已保存到: {save_path}")
+
+        # 使用真实YOLO模型进行预测
+        logger.info(f"[{request_id}] 开始真实YOLO预测（二进制接口）")
+        predictions = yolo_prediction(image, request_id)
+
+        # 计算处理时间
+        processing_time = time.time() - start_time
+
+        # 构建响应（与 /predict 保持一致）
+        response = {
+            "functionName": "make_home",
+            "status": "success",
+            "results": predictions,
+            "image_path": save_path.replace("\\", "/"),
+            "timestamp": datetime.now().isoformat(),
+            "total_objects": len(predictions),
+            "mode": prediction_mode,
+            "request_id": request_id,
+            "model_info": {
+                "model_classes": model.names if model else {},
+                "model_loaded": model is not None,
+                "yolo_available": True,
+                "model_path": "best.pt",
+                "prediction_note": "使用真实YOLO模型进行目标检测"
+            },
+            "processing_time_seconds": round(processing_time, 3)
+        }
+
+        logger.info(f"[{request_id}] 预测完成（二进制接口），检测到 {len(predictions)} 个对象，耗时: {processing_time:.3f}秒")
+
+        return JSONResponse(content=response)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[{request_id}] 二进制预测过程中发生错误: {e}")
         raise HTTPException(status_code=500, detail=f"预测失败: {str(e)}")
 
 if __name__ == "__main__":
