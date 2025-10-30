@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 # 全局变量
 model = None
+wall_model = None
 prediction_mode = "real"
 
 # 创建FastAPI应用
@@ -137,6 +138,53 @@ def load_model() -> bool:
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return False
 
+def load_wall_model() -> bool:
+    """加载墙体YOLO模型（best_wall.pt）"""
+    global wall_model
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_filename = "best_wall.pt"
+        model_path = os.path.join(script_dir, model_filename)
+
+        current_dir = os.getcwd()
+        logger.info(f"当前工作目录: {current_dir}")
+        logger.info(f"脚本目录: {script_dir}")
+        logger.info(f"墙体模型文件路径: {model_path}")
+
+        if not os.path.exists(model_path):
+            logger.error(f"墙体模型文件不存在: {model_path}")
+            try:
+                files_in_dir = os.listdir(script_dir)
+                logger.info(f"脚本目录下的文件: {files_in_dir}")
+            except Exception as list_error:
+                logger.error(f"无法列出脚本目录文件: {list_error}")
+            return False
+
+        if not os.access(model_path, os.R_OK):
+            logger.error(f"墙体模型文件无读取权限: {model_path}")
+            return False
+
+        try:
+            file_size = os.path.getsize(model_path)
+            logger.info(f"墙体模型文件大小: {file_size} 字节")
+            if file_size == 0:
+                logger.error("墙体模型文件为空")
+                return False
+        except Exception as size_error:
+            logger.error(f"无法获取墙体模型文件大小: {size_error}")
+            return False
+
+        logger.info(f"正在加载墙体YOLO模型: {model_path}")
+        wall_model = YOLO(model_path)
+        logger.info("墙体YOLO模型加载成功")
+        return True
+    except Exception as e:
+        logger.error(f"加载墙体YOLO模型失败: {e}")
+        logger.error(f"异常类型: {type(e).__name__}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return False
+
 def calculate_obb_center_and_rotation(obb_coords: np.ndarray) -> Tuple[Tuple[float, float], float]:
     """
     计算OBB的中心点和旋转角度（符合UE坐标系统）
@@ -171,6 +219,36 @@ def calculate_obb_center_and_rotation(obb_coords: np.ndarray) -> Tuple[Tuple[flo
     ue_angle = ue_angle % 360
     
     return (center_x, center_y), ue_angle
+
+def calculate_wall_endpoints_from_obb(obb_coords: np.ndarray) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """
+    根据OBB四点坐标，计算两条较短边的中点（墙的起止点）
+
+    返回 (start_point, end_point)，每个为 (x, y)
+    """
+    p = obb_coords.reshape(4, 2)
+    def dist(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    d01 = dist(p[0], p[1])
+    d12 = dist(p[1], p[2])
+    d23 = dist(p[2], p[3])
+    d30 = dist(p[3], p[0])
+
+    # 判断哪一对对边更短（两条相对边长度相等）
+    # 对边成对：(0-1, 2-3) 与 (1-2, 3-0)
+    pair1 = (d01, d23)
+    pair2 = (d12, d30)
+    use_pair1 = (d01 + d23) <= (d12 + d30)
+
+    if use_pair1:
+        mid1 = ((p[0][0] + p[1][0]) / 2.0, (p[0][1] + p[1][1]) / 2.0)
+        mid2 = ((p[2][0] + p[3][0]) / 2.0, (p[2][1] + p[3][1]) / 2.0)
+    else:
+        mid1 = ((p[1][0] + p[2][0]) / 2.0, (p[1][1] + p[2][1]) / 2.0)
+        mid2 = ((p[3][0] + p[0][0]) / 2.0, (p[3][1] + p[0][1]) / 2.0)
+
+    return mid1, mid2
 
 def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
     """
@@ -217,12 +295,14 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                 
                 # 获取类别名称
                 class_name = model.names[int(cls)]
+                class_name_str = str(class_name).lower()
+                z_value = 1500.0 if class_name_str.startswith("window") else 0.0
                 
                 prediction = {
                     "location": {
                         "x": float(center[0]),
                         "y": float(center[1]),
-                        "z": 0.0
+                        "z": float(z_value)
                     },
                     "rotation": {
                         "x": 0.0,  # 滚转角，设为0
@@ -254,12 +334,14 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                 
                 # 获取类别名称
                 class_name = model.names[int(cls)]
+                class_name_str = str(class_name).lower()
+                z_value = 1500.0 if class_name_str.startswith("window") else 0.0
                 
                 prediction = {
                     "location": {
                         "x": float(center_x),
                         "y": float(center_y),
-                        "z": 0.0
+                        "z": float(z_value)
                     },
                     "rotation": {
                         "x": 0.0,
@@ -277,6 +359,77 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
         else:
             logger.warning(f"[{request_id}] 未检测到任何对象")
         
+        # 使用墙体模型进行二次预测
+        try:
+            if wall_model is not None:
+                logger.info(f"[{request_id}] 开始使用墙体模型进行二次预测")
+                wall_results = wall_model.predict(image, verbose=False)
+                if wall_results:
+                    wall_result = wall_results[0]
+                    # 优先使用 OBB 结果
+                    if hasattr(wall_result, 'obb') and wall_result.obb is not None:
+                        obb_data = wall_result.obb
+                        boxes = obb_data.xyxyxyxy.cpu().numpy()
+                        confidences = obb_data.conf.cpu().numpy()
+                        classes = obb_data.cls.cpu().numpy()
+                        for i, (box, conf, cls) in enumerate(zip(boxes, confidences, classes)):
+                            obb_coords = box.reshape(4, 2)
+                            center, rotation = calculate_obb_center_and_rotation(obb_coords)
+                            sp, ep = calculate_wall_endpoints_from_obb(obb_coords)
+                            prediction = {
+                                "location": {
+                                    "x": float(center[0]),
+                                    "y": float(center[1]),
+                                    "z": 0.0,
+                                    "start_point": {"x": float(sp[0]), "y": float(sp[1]), "z": 0.0},
+                                    "end_point": {"x": float(ep[0]), "y": float(ep[1]), "z": 0.0}
+                                },
+                                "rotation": {"x": 0.0, "y": 0.0, "z": float(rotation)},
+                                "type": 16,
+                                "obj_name": "wall",
+                                "confidence": float(conf)
+                            }
+                            predictions.append(prediction)
+                            logger.info(f"[{request_id}] 墙体OBB对象 {i+1}: 置信度: {conf:.3f}, 中心: ({center[0]:.2f}, {center[1]:.2f}), 起止: ({sp[0]:.2f},{sp[1]:.2f}) -> ({ep[0]:.2f},{ep[1]:.2f}), 旋转: {rotation:.2f}°")
+                    elif hasattr(wall_result, 'boxes') and wall_result.boxes is not None:
+                        boxes_data = wall_result.boxes
+                        boxes = boxes_data.xyxy.cpu().numpy()
+                        confidences = boxes_data.conf.cpu().numpy()
+                        classes = boxes_data.cls.cpu().numpy()
+                        for i, (box, conf, cls) in enumerate(zip(boxes, confidences, classes)):
+                            x1, y1, x2, y2 = box
+                            cx = (x1 + x2) / 2.0
+                            cy = (y1 + y2) / 2.0
+                            w = abs(x2 - x1)
+                            h = abs(y2 - y1)
+                            if w <= h:
+                                sp = (cx, y1)
+                                ep = (cx, y2)
+                            else:
+                                sp = (x1, cy)
+                                ep = (x2, cy)
+                            prediction = {
+                                "location": {
+                                    "x": float(cx),
+                                    "y": float(cy),
+                                    "z": 0.0,
+                                    "start_point": {"x": float(sp[0]), "y": float(sp[1]), "z": 0.0},
+                                    "end_point": {"x": float(ep[0]), "y": float(ep[1]), "z": 0.0}
+                                },
+                                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                                "type": 16,
+                                "obj_name": "wall",
+                                "confidence": float(conf)
+                            }
+                            predictions.append(prediction)
+                            logger.info(f"[{request_id}] 墙体标准框对象 {i+1}: 置信度: {conf:.3f}, 中心: ({cx:.2f}, {cy:.2f}), 起止: ({sp[0]:.2f},{sp[1]:.2f}) -> ({ep[0]:.2f},{ep[1]:.2f})")
+                else:
+                    logger.warning(f"[{request_id}] 墙体模型未返回任何结果")
+            else:
+                logger.warning(f"[{request_id}] 墙体模型未加载，跳过二次预测")
+        except Exception as wall_e:
+            logger.error(f"[{request_id}] 墙体模型预测失败: {wall_e}")
+
         logger.info(f"[{request_id}] 真实YOLO预测完成，检测到 {len(predictions)} 个对象")
         return predictions
         
@@ -289,7 +442,7 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
 async def startup_event():
     """应用启动时的初始化"""
     global prediction_mode
-    
+
     logger.info("============================================================")
     logger.info("正在启动YOLO OBB预测API（真实YOLO模型版）...")
     
@@ -300,7 +453,16 @@ async def startup_event():
     else:
         logger.error("YOLO模型加载失败，API无法启动")
         raise RuntimeError("YOLO模型加载失败，请检查模型文件")
-    
+
+    # 尝试加载墙体模型（不中断启动）
+    try:
+        if load_wall_model():
+            logger.info("墙体模型加载成功，将进行二次预测")
+        else:
+            logger.warning("墙体模型加载失败，墙体相关预测将跳过")
+    except Exception as e:
+        logger.warning(f"加载墙体模型过程中出现异常: {e}")
+
     logger.info(f"当前预测模式: {prediction_mode}")
     logger.info("服务地址: http://0.0.0.0:8000")
     logger.info("API文档: http://0.0.0.0:8000/docs")
