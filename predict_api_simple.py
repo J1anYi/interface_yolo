@@ -250,6 +250,150 @@ def calculate_wall_endpoints_from_obb(obb_coords: np.ndarray) -> Tuple[Tuple[flo
 
     return mid1, mid2
 
+def _is_close_rel(a: float, b: float, tol_ratio: float = 0.02) -> bool:
+    """相对误差判定，98%相似度等价于相对误差<=2%"""
+    try:
+        return abs(a - b) <= tol_ratio * max(abs(a), abs(b), 1.0)
+    except Exception:
+        return False
+
+def _is_points_close(p1: Dict[str, Any], p2: Dict[str, Any], tol_ratio: float = 0.02) -> bool:
+    """端点近似重合判定：x、y均满足相对误差<=2%"""
+    return (
+        isinstance(p1, dict) and isinstance(p2, dict) and
+        _is_close_rel(float(p1.get("x", 0.0)), float(p2.get("x", 0.0)), tol_ratio) and
+        _is_close_rel(float(p1.get("y", 0.0)), float(p2.get("y", 0.0)), tol_ratio)
+    )
+
+def _segment_orientation(sp: Dict[str, Any], ep: Dict[str, Any], tol_ratio: float = 0.02) -> Optional[str]:
+    """墙段方向判断：共享相同x为竖直，共享相同y为水平，否则返回None"""
+    sx, sy = float(sp.get("x", 0.0)), float(sp.get("y", 0.0))
+    ex, ey = float(ep.get("x", 0.0)), float(ep.get("y", 0.0))
+    if _is_close_rel(sx, ex, tol_ratio):
+        return "vertical"
+    if _is_close_rel(sy, ey, tol_ratio):
+        return "horizontal"
+    return None
+
+def _line_value(sp: Dict[str, Any], ep: Dict[str, Any], orientation: Optional[str]) -> Optional[float]:
+    """同一直线判定用的线值：竖直用x均值，水平用y均值"""
+    if orientation == "vertical":
+        return (float(sp.get("x", 0.0)) + float(ep.get("x", 0.0))) / 2.0
+    if orientation == "horizontal":
+        return (float(sp.get("y", 0.0)) + float(ep.get("y", 0.0))) / 2.0
+    return None
+
+def _try_merge_wall(a: Dict[str, Any], b: Dict[str, Any], tol_ratio: float = 0.02, request_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """尝试按规则合并两个墙段，返回新墙或None"""
+    pa = a.get("points") or {}
+    pb = b.get("points") or {}
+    spA, epA = pa.get("start_point"), pa.get("end_point")
+    spB, epB = pb.get("start_point"), pb.get("end_point")
+    if not (isinstance(spA, dict) and isinstance(epA, dict) and isinstance(spB, dict) and isinstance(epB, dict)):
+        return None
+
+    oriA = _segment_orientation(spA, epA, tol_ratio)
+    oriB = _segment_orientation(spB, epB, tol_ratio)
+    if oriA is None or oriB is None or oriA != oriB:
+        return None
+
+    lvA = _line_value(spA, epA, oriA)
+    lvB = _line_value(spB, epB, oriB)
+    if lvA is None or lvB is None or not _is_close_rel(lvA, lvB, tol_ratio):
+        return None
+
+    # 端点连接判定（4种组合）
+    if _is_points_close(spA, spB, tol_ratio):
+        new_start, new_end = epA, epB
+        loc_x = (float(spA["x"]) + float(spB["x"])) / 2.0
+        loc_y = (float(spA["y"]) + float(spB["y"])) / 2.0
+    elif _is_points_close(spA, epB, tol_ratio):
+        new_start, new_end = epA, spB
+        loc_x = (float(spA["x"]) + float(epB["x"])) / 2.0
+        loc_y = (float(spA["y"]) + float(epB["y"])) / 2.0
+    elif _is_points_close(epA, spB, tol_ratio):
+        new_start, new_end = spA, epB
+        loc_x = (float(epA["x"]) + float(spB["x"])) / 2.0
+        loc_y = (float(epA["y"]) + float(spB["y"])) / 2.0
+    elif _is_points_close(epA, epB, tol_ratio):
+        new_start, new_end = spA, spB
+        loc_x = (float(epA["x"]) + float(epB["x"])) / 2.0
+        loc_y = (float(epA["y"]) + float(epB["y"])) / 2.0
+    else:
+        return None
+
+    rot_z = 0.0 if oriA == "vertical" else 90.0
+    confA = float(a.get("confidence", 0.0))
+    confB = float(b.get("confidence", 0.0))
+    new_conf = min(confA, confB)
+
+    merged = {
+        "location": {"x": float(loc_x), "y": float(loc_y), "z": 0.0},
+        "points": {
+            "start_point": {"x": float(new_start["x"]), "y": float(new_start["y"]), "z": 0.0},
+            "end_point": {"x": float(new_end["x"]), "y": float(new_end["y"]), "z": 0.0}
+        },
+        "rotation": {"x": 0.0, "y": 0.0, "z": float(rot_z)},
+        "type": 16,
+        "obj_name": "wall",
+        "confidence": float(new_conf),
+        "status": "已读"
+    }
+    # 详细日志输出
+    try:
+        locA = a.get("location") or {}
+        locB = b.get("location") or {}
+        msg_prefix = f"[{request_id}] " if request_id else ""
+        logger.info(
+            msg_prefix +
+            (
+                "墙体合并: "
+                f"A(start=({float(spA['x']):.2f},{float(spA['y']):.2f}), end=({float(epA['x']):.2f},{float(epA['y']):.2f}), "
+                f"pos=({float(locA.get('x', 0.0)):.2f},{float(locA.get('y', 0.0)):.2f})) + "
+                f"B(start=({float(spB['x']):.2f},{float(spB['y']):.2f}), end=({float(epB['x']):.2f},{float(epB['y']):.2f}), "
+                f"pos=({float(locB.get('x', 0.0)):.2f},{float(locB.get('y', 0.0)):.2f})) -> "
+                f"新墙(start=({float(merged['points']['start_point']['x']):.2f},{float(merged['points']['start_point']['y']):.2f}), "
+                f"end=({float(merged['points']['end_point']['x']):.2f},{float(merged['points']['end_point']['y']):.2f}), "
+                f"pos=({float(merged['location']['x']):.2f},{float(merged['location']['y']):.2f}))"
+            )
+        )
+    except Exception as log_e:
+        logger.error(f"{msg_prefix if request_id else ''}墙体合并日志输出异常: {log_e}")
+    return merged
+
+def _merge_walls_iterative(walls: List[Dict[str, Any]], tol_ratio: float = 0.02, request_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """迭代执行墙段合并，直到不再产生新墙"""
+    walls_list = list(walls)
+    while True:
+        merged_any = False
+        n = len(walls_list)
+        for i in range(n):
+            for j in range(i + 1, n):
+                merged = _try_merge_wall(walls_list[i], walls_list[j], tol_ratio, request_id=request_id)
+                if merged is not None:
+                    walls_list = [walls_list[k] for k in range(n) if k != i and k != j]
+                    walls_list.append(merged)
+                    merged_any = True
+                    break
+            if merged_any:
+                break
+        if not merged_any:
+            break
+    return walls_list
+
+def merge_wall_segments_in_predictions(predictions: List[Dict[str, Any]], request_id: str, tol_ratio: float = 0.02) -> List[Dict[str, Any]]:
+    """在整体预测结果中合并墙段，并返回新的结果列表"""
+    walls = [p for p in predictions if p.get("obj_name") == "wall" and isinstance(p.get("points"), dict)]
+    others = [p for p in predictions if not (p.get("obj_name") == "wall" and isinstance(p.get("points"), dict))]
+    if not walls:
+        return predictions
+    before = len(walls)
+    merged = _merge_walls_iterative(walls, tol_ratio, request_id=request_id)
+    after = len(merged)
+    if after != before:
+        logger.info(f"[{request_id}] 墙体合并：原墙段 {before} -> 合并后 {after}")
+    return others + merged
+
 def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
     """
     使用真实YOLO模型进行预测
@@ -296,7 +440,7 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                 # 获取类别名称
                 class_name = model.names[int(cls)]
                 class_name_str = str(class_name).lower()
-                z_value = 1500.0 if class_name_str.startswith("window") else 0.0
+                z_value = 150.0 if class_name_str.startswith("window") else 0.0
                 
                 prediction = {
                     "location": {
@@ -433,6 +577,11 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                 logger.warning(f"[{request_id}] 墙体模型未加载，跳过二次预测")
         except Exception as wall_e:
             logger.error(f"[{request_id}] 墙体模型预测失败: {wall_e}")
+        # 合并墙段
+        try:
+            predictions = merge_wall_segments_in_predictions(predictions, request_id, tol_ratio=0.02)
+        except Exception as merge_e:
+            logger.error(f"[{request_id}] 墙体合并流程异常: {merge_e}")
 
         logger.info(f"[{request_id}] 真实YOLO预测完成，检测到 {len(predictions)} 个对象")
         return predictions
