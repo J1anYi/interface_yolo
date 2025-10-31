@@ -380,7 +380,9 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                                 "location": {
                                     "x": float(center[0]),
                                     "y": float(center[1]),
-                                    "z": 0.0,
+                                    "z": 0.0
+                                },
+                                "points": {
                                     "start_point": {"x": float(sp[0]), "y": float(sp[1]), "z": 0.0},
                                     "end_point": {"x": float(ep[0]), "y": float(ep[1]), "z": 0.0}
                                 },
@@ -412,7 +414,9 @@ def yolo_prediction(image: Image.Image, request_id: str) -> Dict[str, Any]:
                                 "location": {
                                     "x": float(cx),
                                     "y": float(cy),
-                                    "z": 0.0,
+                                    "z": 0.0
+                                },
+                                "points": {
                                     "start_point": {"x": float(sp[0]), "y": float(sp[1]), "z": 0.0},
                                     "end_point": {"x": float(ep[0]), "y": float(ep[1]), "z": 0.0}
                                 },
